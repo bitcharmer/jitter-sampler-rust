@@ -1,12 +1,10 @@
-#![feature(asm)]
-
 use clap::{App, AppSettings, Arg, ArgMatches};
 use nix::sched::*;
 use nix::time::*;
+use std::arch::asm;
 use std::fmt::Debug;
-use std::str::FromStr;
 use std::net::UdpSocket;
-
+use std::str::FromStr;
 
 const NANOS_IN_SEC: i64 = 1_000_000_000;
 
@@ -32,14 +30,13 @@ struct ProgramArgs {
 impl Default for ProgramArgs {
     fn default() -> ProgramArgs {
         ProgramArgs {
-            duration_seconds : 0,
-            report_interval_millis : 0,
-            cpu : -1,
-            time_func : clock_realtime,
+            duration_seconds: 0,
+            report_interval_millis: 0,
+            cpu: -1,
+            time_func: clock_realtime,
         }
     }
 }
-
 
 fn main() {
     let program_args = parse_program_args();
@@ -54,10 +51,9 @@ fn main() {
     publish_results(&jitter)
 }
 
-
 fn capture_jitter(program_args: &ProgramArgs, jitter: &mut Vec<Jitter>) {
     let mut previous = (program_args.time_func)();
-    let deadline = previous + program_args.duration_seconds * NANOS_IN_SEC; 
+    let deadline = previous + program_args.duration_seconds * NANOS_IN_SEC;
     let mut next_report = previous + program_args.report_interval_millis * 1_000_000;
 
     let mut max = i64::MIN;
@@ -85,56 +81,51 @@ fn capture_jitter(program_args: &ProgramArgs, jitter: &mut Vec<Jitter>) {
     }
 }
 
-
 fn publish_results(jitter: &Vec<Jitter>) {
     let socket = UdpSocket::bind("0.0.0.0:0").expect("Unable to bind to influx udp socket");
     for data in jitter {
         if data.ts == 0 {
-            continue
+            continue;
         }
-        
+
         let str: String = format!("jitter latency={} {}", data.latency, data.ts);
         println!("{}", str);
-        socket.send_to(str.as_bytes(), "127.0.0.1:8089").expect("Error while sending datagram");
+        socket
+            .send_to(str.as_bytes(), "127.0.0.1:8089")
+            .expect("Error while sending datagram");
     }
 }
-
 
 fn clock_realtime() -> i64 {
     let time_spec = clock_gettime(ClockId::CLOCK_REALTIME).unwrap();
     return time_spec.tv_sec() * NANOS_IN_SEC + time_spec.tv_nsec();
 }
 
- 
 fn rdtsc_realtime() -> i64 {
-    unsafe {
-        (rdtsc() as f64 / TSC_FREQUENCY) as i64 - TSC_OFFSET
-    }
+    unsafe { (rdtsc() as f64 / TSC_FREQUENCY) as i64 - TSC_OFFSET }
 }
-
 
 //noinspection ALL
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn rdtsc() -> i64 {
     let upper: i64;
     let lower: i64;
-    
+
     unsafe {
         asm!(
         "rdtsc",
-        out("rax") lower,   
+        out("rax") lower,
         out("rdx") upper,
         options(pure, readonly, nostack)
         )
     }
-    
+
     upper << 32 | lower
 }
 
-
 fn calibrate_tsc_offset(tsc_frequency: f64) -> i64 {
-    let mut min_diff = i64::MAX; 
-    
+    let mut min_diff = i64::MAX;
+
     for _n in 1..1_000_000 {
         let diff = (rdtsc() as f64 / tsc_frequency) as i64 - clock_realtime();
         if diff < min_diff {
@@ -145,7 +136,6 @@ fn calibrate_tsc_offset(tsc_frequency: f64) -> i64 {
     return min_diff;
 }
 
-
 fn affinitize_to_cpu(cpu: i64) {
     let pid = nix::unistd::Pid::this();
     let mut cpus = CpuSet::new();
@@ -153,7 +143,6 @@ fn affinitize_to_cpu(cpu: i64) {
         .expect("Unable to set target CPU in cpuset");
     sched_setaffinity(pid, &cpus).expect(&format!("Unable to set CPU affinity to cpu: {}", cpu));
 }
-
 
 fn parse_program_args() -> ProgramArgs {
     let matches = App::new("Platform jitter sampler")
@@ -201,18 +190,17 @@ fn parse_program_args() -> ProgramArgs {
         .setting(AppSettings::ColoredHelp)
         .get_matches();
 
-
-    let time_func: TimeFunc = 
-        if !matches.is_present("tsc_frequency") {
-            clock_realtime
-        } else {
-            let tsc_frequency: f64 = parse_program_arg(&matches, "tsc_frequency").  expect("Incorrect value for frequency");
-            unsafe {
-                TSC_FREQUENCY = tsc_frequency;
-                TSC_OFFSET = calibrate_tsc_offset(tsc_frequency);
-                rdtsc_realtime
-            }
-        };  
+    let time_func: TimeFunc = if !matches.is_present("tsc_frequency") {
+        clock_realtime
+    } else {
+        let tsc_frequency: f64 =
+            parse_program_arg(&matches, "tsc_frequency").expect("Incorrect value for frequency");
+        unsafe {
+            TSC_FREQUENCY = tsc_frequency;
+            TSC_OFFSET = calibrate_tsc_offset(tsc_frequency);
+            rdtsc_realtime
+        }
+    };
 
     let program_args = ProgramArgs {
         duration_seconds: parse_program_arg(&matches, "duration_seconds")
@@ -220,12 +208,11 @@ fn parse_program_args() -> ProgramArgs {
         report_interval_millis: parse_program_arg(&matches, "report_interval_millis")
             .expect("Incorrect value for reporting interval"),
         cpu: parse_program_arg(&matches, "cpu").expect("Incorrect value for cpu"),
-        time_func
+        time_func,
     };
 
     return program_args;
 }
-
 
 fn parse_program_arg<T: FromStr>(matches: &ArgMatches, arg_name: &str) -> Result<T, String> {
     if let Some(s) = matches.value_of(arg_name) {
