@@ -1,150 +1,39 @@
-use clap::{App, AppSettings, Arg, ArgMatches};
-use nix::sched::*;
-use nix::time::*;
-use std::arch::asm;
-use std::fmt::Debug;
-use std::net::UdpSocket;
-use std::str::FromStr;
+mod utils;
+mod jitter;
+mod influx;
 
-const NANOS_IN_SEC: i64 = 1_000_000_000;
+use std::{str::FromStr, iter::FromIterator};
 
-static mut TSC_FREQUENCY: f64 = 0f64;
-static mut TSC_OFFSET: i64 = 0;
+use log::info;
+use utils::*;
+use jitter::*;
+use clap::{App, Arg, AppSettings, ArgMatches};
 
-type TimeFunc = fn() -> i64;
+use crate::influx::publish_results;
 
-#[derive(Debug, Clone, Copy)]
-struct Jitter {
-    ts: i64,
-    latency: i64,
-}
 
-#[derive(Debug)]
-struct ProgramArgs {
-    duration_seconds: i64,
-    report_interval_millis: i64,
-    cpu: i64,
-    time_func: TimeFunc,
-}
-
-impl Default for ProgramArgs {
-    fn default() -> ProgramArgs {
-        ProgramArgs {
-            duration_seconds: 0,
-            report_interval_millis: 0,
-            cpu: -1,
-            time_func: clock_realtime,
-        }
-    }
-}
 
 fn main() {
+    env_logger::init();
+
     let program_args = parse_program_args();
-    println!("{:?}", program_args);
-    affinitize_to_cpu(program_args.cpu);
+    info!("Running with args:\n{:#?}", program_args);
 
-    let sample_count =
-        (program_args.duration_seconds * 1000 / program_args.report_interval_millis) as usize;
-    let mut jitter: Vec<Jitter> = vec![Jitter { ts: 0, latency: 0 }; sample_count];
-
-    capture_jitter(&program_args, &mut jitter);
-    publish_results(&jitter)
-}
-
-fn capture_jitter(program_args: &ProgramArgs, jitter: &mut Vec<Jitter>) {
-    let mut previous = (program_args.time_func)();
-    let deadline = previous + program_args.duration_seconds * NANOS_IN_SEC;
-    let mut next_report = previous + program_args.report_interval_millis * 1_000_000;
-
-    let mut max = i64::MIN;
-    let mut idx = 0;
-
-    while previous < deadline {
-        let mut now = (program_args.time_func)();
-        let latency = now - previous;
-        if latency > max {
-            max = latency
-        }
-
-        if now > next_report {
-            next_report = now + program_args.report_interval_millis * 1_000_000;
-            jitter[idx] = Jitter {
-                ts: now,
-                latency: max,
-            };
-            max = i64::MIN;
-            idx += 1;
-            now = (program_args.time_func)();
-        }
-
-        previous = now;
-    }
-}
-
-fn publish_results(jitter: &Vec<Jitter>) {
-    let socket = UdpSocket::bind("0.0.0.0:0").expect("Unable to bind to influx udp socket");
-    for data in jitter {
-        if data.ts == 0 {
-            continue;
-        }
-
-        let str: String = format!("jitter latency={} {}", data.latency, data.ts);
-        println!("{}", str);
-        socket
-            .send_to(str.as_bytes(), "127.0.0.1:8089")
-            .expect("Error while sending datagram");
-    }
-}
-
-fn clock_realtime() -> i64 {
-    let time_spec = clock_gettime(ClockId::CLOCK_REALTIME).unwrap();
-    return time_spec.tv_sec() * NANOS_IN_SEC + time_spec.tv_nsec();
-}
-
-fn rdtsc_realtime() -> i64 {
-    unsafe { (rdtsc() as f64 / TSC_FREQUENCY) as i64 - TSC_OFFSET }
-}
-
-//noinspection ALL
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn rdtsc() -> i64 {
-    let upper: i64;
-    let lower: i64;
-
-    unsafe {
-        asm!(
-        "rdtsc",
-        out("rax") lower,
-        out("rdx") upper,
-        options(pure, readonly, nostack)
-        )
+    if program_args.mlock_enabled {
+        mlock()
     }
 
-    upper << 32 | lower
-}
+    let cpus = program_args.cpus.clone();
+    let args = &program_args;
 
-fn calibrate_tsc_offset(tsc_frequency: f64) -> i64 {
-    let mut min_diff = i64::MAX;
-
-    for _n in 1..1_000_000 {
-        let diff = (rdtsc() as f64 / tsc_frequency) as i64 - clock_realtime();
-        if diff < min_diff {
-            min_diff = diff;
+    crossbeam::scope(|s| {
+        for cpu in cpus {
+            s.spawn(move |_| { capture_jitter(cpu, args); });
         }
-    }
-
-    return min_diff;
+    }).unwrap();
 }
 
-fn affinitize_to_cpu(cpu: i64) {
-    let pid = nix::unistd::Pid::this();
-    let mut cpus = CpuSet::new();
-    cpus.set(cpu as usize)
-        .expect("Unable to set target CPU in cpuset");
-    sched_setaffinity(pid, &cpus).expect(&format!("Unable to set CPU affinity to cpu: {}", cpu));
-}
-
-fn parse_program_args() -> ProgramArgs {
+pub fn parse_program_args() -> ProgramArgs {
     let matches = App::new("Platform jitter sampler")
         .term_width(250)
         .version("1.0")
@@ -160,6 +49,22 @@ fn parse_program_args() -> ProgramArgs {
                 .required(true),
         )
         .arg(
+            Arg::new("mlock")
+                .short('m')
+                .long("mlock")
+                .about("Enable mlocking jitter sampler pages to RAM")
+                .takes_value(false)
+                .required(false),
+        )
+        .arg(
+            Arg::new("lapic")
+                .short('l')
+                .long("lapic")
+                .about("Disable local APIC interrupts")
+                .takes_value(false)
+                .required(false),
+        )
+        .arg(
             Arg::new("report_interval_millis")
                 .short('r')
                 .long("report-interval")
@@ -169,11 +74,11 @@ fn parse_program_args() -> ProgramArgs {
                 .required(true),
         )
         .arg(
-            Arg::new("cpu")
+            Arg::new("cpus")
                 .short('c')
-                .long("cpu")
-                .value_name("target cpu")
-                .about("CPU to affinitise the program thread to")
+                .long("cpus")
+                .value_name("target cpus")
+                .about("CPU to affinitise the program thread to (can be passed as list of ranges, eg:")
                 .takes_value(true)
                 .required(true),
         )
@@ -186,6 +91,23 @@ fn parse_program_args() -> ProgramArgs {
                 .takes_value(true)
                 .required(false),
         )
+        .arg(
+            Arg::new("influx_url")
+                .short('i')
+                .long("influx-url")
+                .value_name("URL")
+                .about("Influx DB url (eg: http://foo.bar.com:8086)")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::new("influx_db")
+                .short('b')
+                .long("influx-db")
+                .about("Influx database name")
+                .takes_value(true)
+                .required(true),
+        )
         .setting(AppSettings::ArgRequiredElseHelp)
         .setting(AppSettings::ColoredHelp)
         .get_matches();
@@ -193,26 +115,55 @@ fn parse_program_args() -> ProgramArgs {
     let time_func: TimeFunc = if !matches.is_present("tsc_frequency") {
         clock_realtime
     } else {
-        let tsc_frequency: f64 =
-            parse_program_arg(&matches, "tsc_frequency").expect("Incorrect value for frequency");
-        unsafe {
-            TSC_FREQUENCY = tsc_frequency;
-            TSC_OFFSET = calibrate_tsc_offset(tsc_frequency);
-            rdtsc_realtime
-        }
+        clock_realtime
+        // let tsc_frequency: f64 = 0;
+        //     parse_program_arg(&matches, "tsc_frequency").expect("Incorrect value for frequency");
+        // unsafe {
+        //     TSC_FREQUENCY = tsc_frequency;
+        //     TSC_OFFSET = calibrate_tsc_offset(tsc_frequency);
+        //     rdtsc_realtime
+        // }
     };
+   
+    let cpu_list_str = matches.value_of("cpus").expect("Unable to extract cpu list from arg: cpus");
 
     let program_args = ProgramArgs {
         duration_seconds: parse_program_arg(&matches, "duration_seconds")
             .expect("Unable to parse duration argument"),
         report_interval_millis: parse_program_arg(&matches, "report_interval_millis")
             .expect("Incorrect value for reporting interval"),
-        cpu: parse_program_arg(&matches, "cpu").expect("Incorrect value for cpu"),
+        cpus: parse_cpu_list(cpu_list_str),
         time_func,
+        mlock_enabled: matches.is_present("mlock"),
+        lapic_enabled: !matches.is_present("lapic"),
+        influx_url: String::from(matches.value_of("influx_url").expect("Unable to extract InfluxDB url from program args")),
+        influx_db: String::from(matches.value_of("influx_db").expect("Unable to extract Influx database name from program args")),
+        local_hostname: gethostname::gethostname().into_string().expect("Unable to obtain local hostname"),
     };
 
     return program_args;
 }
+
+
+fn parse_cpu_list(cpu_list_str: &str) -> Vec<u32> {
+    let mut result: Vec<u32> = Vec::default();
+    let elements = cpu_list_str.trim().split(',');
+    for element in elements {
+        if element.contains('-') {
+            let range = Vec::from_iter(element.split('-'));
+            let begin = range[0].parse::<u32>().expect(format!("Unable to parse cpu: {}", range[0]).as_str());
+            let end = range[1].parse::<u32>().expect(format!("Unable to parse cpu: {}", range[0]).as_str());
+            for cpu in begin..end + 1 {
+                result.push(cpu);
+            }
+        } else {
+            result.push(element.parse::<u32>().expect(format!("Unable to parse cpu: {}", element).as_str()));
+        }
+    }
+    
+    result
+}
+
 
 fn parse_program_arg<T: FromStr>(matches: &ArgMatches, arg_name: &str) -> Result<T, String> {
     if let Some(s) = matches.value_of(arg_name) {
