@@ -1,6 +1,6 @@
 use log::{info, warn};
 
-use crate::{utils::{ProgramArgs, NANOS_IN_SEC, disable_lapic, enable_lapic}, publish_results};
+use crate::{utils::{ProgramArgs, NANOS_IN_SEC, disable_lapic, enable_lapic}, influx::publish_results};
 
 
 #[derive(Debug, Clone, Copy)]
@@ -49,10 +49,8 @@ fn busy_loop(program_args: &ProgramArgs, jitter: &mut Vec<Jitter>) {
 
         if now > next_report {
             next_report = now + program_args.report_interval_millis * 1_000_000;
-            jitter[idx] = Jitter {
-                ts: now,
-                latency: max,
-            };
+            jitter[idx].ts = now;
+            jitter[idx].latency = max;
             max = i64::MIN;
             idx += 1;
             now = (program_args.time_func)();

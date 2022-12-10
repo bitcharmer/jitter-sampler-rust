@@ -1,12 +1,11 @@
 use std::arch::asm;
 
 use log::*;
-use nix::{time::{clock_gettime, ClockId}, sched::{CpuSet, sched_setaffinity}, sys::mman};
+use nix::{time::{clock_gettime, ClockId}, sched::{CpuSet, sched_setaffinity}, sys::mman, unistd::Pid};
 
 pub const NANOS_IN_SEC: i64 = 1_000_000_000;
-
-static mut TSC_FREQUENCY: f64 = 0f64;
-static mut TSC_OFFSET: i64 = 0;
+pub static mut TSC_FREQUENCY: f64 = 0f64;
+pub static mut TIME_OFFSET: i64 = 0i64;
 
 
 pub type TimeFunc = fn() -> i64;
@@ -41,10 +40,24 @@ impl Default for ProgramArgs {
     }
 }
 
-
 pub fn clock_realtime() -> i64 {
     let time_spec = clock_gettime(ClockId::CLOCK_REALTIME).unwrap();
     return time_spec.tv_sec() * NANOS_IN_SEC + time_spec.tv_nsec();
+}
+
+
+pub fn clock_monotonic() -> i64 {
+    let time_spec = clock_gettime(ClockId::CLOCK_MONOTONIC).unwrap();
+    unsafe {
+        return time_spec.tv_sec() * NANOS_IN_SEC + time_spec.tv_nsec() + TIME_OFFSET;
+    }
+}
+
+
+pub fn clock_rdtsc() -> i64 {
+    unsafe {
+        (rdtsc() as f64 / TSC_FREQUENCY) as i64 + TIME_OFFSET
+    }
 }
 
 
@@ -59,7 +72,7 @@ pub fn rdtsc() -> i64 {
         "rdtsc",
         out("rax") lower,
         out("rdx") upper,
-        options(pure, readonly, nostack)
+        // options(pure, readonly, nostack)
         )
     }
 
@@ -68,11 +81,9 @@ pub fn rdtsc() -> i64 {
 
 
 pub fn affinitize_to_cpu(cpu: u32) {
-    let pid = nix::unistd::Pid::this();
     let mut cpus = CpuSet::new();
-    cpus.set(cpu as usize)
-        .expect("Unable to set target CPU in cpuset");
-    sched_setaffinity(pid, &cpus).expect(&format!("Unable to set CPU affinity to cpu: {}", cpu));
+    cpus.set(cpu as usize).expect("Unable to set target CPU in cpuset");
+    sched_setaffinity(Pid::from_raw(0), &cpus).expect(&format!("Unable to set CPU affinity to cpu: {}", cpu));
 }
 
 

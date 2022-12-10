@@ -1,6 +1,6 @@
 [package]
 name = "jitter"
-version = "0.2.0"
+version = "1.0.1"
 authors = ["Wojciech Kudla <Wojciech.Kudla@gmail.com>"]
 edition = "2018"
 
