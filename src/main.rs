@@ -2,14 +2,14 @@ mod utils;
 mod jitter;
 mod influx;
 
-use std::{str::FromStr, iter::FromIterator};
+use std::iter::FromIterator;
 
 use env_logger::Env;
 use log::{info, error};
 use nix::libc;
 use utils::*;
 use jitter::*;
-use clap::{App, Arg, AppSettings, ArgMatches};
+use clap::{Arg, ArgMatches, Command, ArgAction};
 
 
 fn main() {
@@ -22,7 +22,7 @@ fn main() {
         mlock()
     }
 
-    if !program_args.lapic_enabled {
+    if program_args.lapic_disabled {
         unsafe { 
             if libc::iopl(3) != 0 {
                 error!("Error while changing privilege level of the process with iopl(). Unable to turn off LAPIC.");
@@ -46,14 +46,14 @@ pub fn parse_program_args() -> ProgramArgs {
     let matches = match_arguments();
     
     let program_args = ProgramArgs {
-        duration_seconds: parse_program_arg(&matches, "duration_seconds").expect("Unable to parse duration argument"),
-        report_interval_millis: parse_program_arg(&matches, "report_interval_millis").expect("Incorrect value for reporting interval"),
-        cpus: parse_cpu_list(matches.value_of("cpus").expect("Unable to extract cpu list from arg: cpus")),
+        duration_seconds: *matches.get_one::<i64>("duration_seconds").expect("Unable to parse duration argument"),
+        report_interval_millis: *matches.get_one::<i64>("report_interval_millis").expect("Incorrect value for reporting interval"),
+        cpus: parse_cpu_list(matches.get_one::<String>("cpus").expect("Unable to extract cpu list from arg: cpus")),
         time_func: configure_clock(&matches),
-        mlock_enabled: matches.is_present("mlock"),
-        lapic_enabled: !matches.is_present("lapic"),
-        influx_url: String::from(matches.value_of("influx_url").expect("Unable to extract InfluxDB url from program args")),
-        influx_db: String::from(matches.value_of("influx_db").expect("Unable to extract Influx database name from program args")),
+        mlock_enabled: *matches.get_one::<bool>("mlock").unwrap(),
+        lapic_disabled: *matches.get_one::<bool>("lapic").unwrap(),
+        influx_url: matches.get_one::<String>("influx_url").expect("Unable to extract InfluxDB url from program args").clone(),
+        influx_db: matches.get_one::<String>("influx_db").expect("Unable to extract Influx database name from program args").clone(),
         local_hostname: gethostname::gethostname().into_string().expect("Unable to obtain local hostname"),
     };
 
@@ -62,13 +62,13 @@ pub fn parse_program_args() -> ProgramArgs {
 
 
 fn configure_clock(matches: &ArgMatches) -> fn() -> i64 {
-    if matches.is_present("tsc_frequency") {
+    if matches.contains_id("tsc_frequency") {
         unsafe {
-            utils::TSC_FREQUENCY = parse_program_arg(matches, "tsc_frequency").expect("Unable to parse TSC frequency");
+            utils::TSC_FREQUENCY = *matches.get_one::<f64>("tsc_frequency").expect("Unable to parse TSC frequency");
         }
     }
     
-    let time_func: TimeFunc = match matches.value_of("time_source") {
+    let time_func: TimeFunc = match matches.get_one::<String>("time_source").map(|s| { s.as_str() }) {
         Some(clock_type) => match clock_type {
             "clock_realtime" => clock_realtime,
             "clock_monotonic" => clock_monotonic,
@@ -89,7 +89,7 @@ fn configure_clock(matches: &ArgMatches) -> fn() -> i64 {
 
 
 fn match_arguments() -> ArgMatches {
-    let matches = App::new("Platform jitter sampler")
+    let matches = Command::new("Platform jitter sampler")
         .term_width(250)
         .version("1.0.1")
         .author("Wojciech Kudla")
@@ -99,81 +99,75 @@ fn match_arguments() -> ArgMatches {
                 .short('d')
                 .long("duration")
                 .value_name("seconds")
-                .about("How long to keep running for")
+                .help("How long to keep running for")
                 .default_value("10")
-                .takes_value(true)
+                .value_parser(clap::value_parser!(i64))
         )
         .arg(
             Arg::new("report_interval_millis")
                 .short('r')
                 .long("report-interval")
                 .value_name("milliseconds")
-                .about("Sampling interval")
+                .help("Sampling interval")
                 .default_value("100")
-                .takes_value(true)
+                .value_parser(clap::value_parser!(i64))
         )
         .arg(
             Arg::new("mlock")
                 .short('m')
                 .long("mlock")
-                .about("Mlock jitter data pages to RAM")
-                .takes_value(false)
-                .required(false),
+                .help("Mlock jitter data pages to RAM")
+                .required(false)
+                .action(ArgAction::SetTrue)
+                .default_value("false")
         )
         .arg(
             Arg::new("lapic")
                 .short('l')
                 .long("lapic")
-                .about("Disable local APIC interrupts (requires superuser privileges).")
-                .takes_value(false)
-                .required(false),
+                .help("Disable local APIC interrupts (requires superuser privileges).")
+                .required(false)
+                .action(ArgAction::SetTrue)
+                .default_value("false")
         )
         .arg(
             Arg::new("cpus")
                 .short('c')
                 .long("cpus")
                 .value_name("target cpus")
-                .about("CPU to affinitise the program thread(s) to; can be passed as list of ranges, eg: '1,4-6,8-12,15'")
+                .help("CPU to affinitise the program thread(s) to; can be passed as list of ranges, eg: '1,4-6,8-12,15'")
                 .default_value("0")
-                .takes_value(true)
         )
         .arg(
             Arg::new("tsc_frequency")
                 .short('f')
                 .long("tsc-frequency")
                 .value_name("GHz")
-                .about("Frequency of TSC as a decimal number")
-                .takes_value(true)
-                .required(false),
+                .help("Frequency of TSC as a decimal number")
+                .value_parser(clap::value_parser!(f64))
         )
         .arg(
             Arg::new("time_source")
                 .short('t')
                 .long("time-source")
-                .about("Implementation to use for measuring elapsed time: clock_realtime | clock_monotonic | rdtsc")
+                .help("Implementation to use for measuring elapsed time: clock_realtime | clock_monotonic | rdtsc")
                 .default_value("clock_realtime")
-                .takes_value(true)
-                .required(false),
         )
         .arg(
             Arg::new("influx_url")
                 .short('i')
                 .long("influx-url")
                 .value_name("URL")
-                .about("Influx database url (eg: http://foo.bar.com:8086)")
-                .takes_value(true)
+                .help("Influx database url (eg: http://foo.bar.com:8086)")
                 .required(true),
         )
         .arg(
             Arg::new("influx_db")
                 .short('b')
                 .long("influx-db")
-                .about("Influx database name")
-                .takes_value(true)
+                .help("Influx database name")
                 .required(true),
         )
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .setting(AppSettings::ColoredHelp)
         .get_matches();
     
     matches
@@ -197,16 +191,4 @@ fn parse_cpu_list(cpu_list_str: &str) -> Vec<u32> {
     }
     
     result
-}
-
-
-fn parse_program_arg<T: FromStr>(matches: &ArgMatches, arg_name: &str) -> Result<T, String> {
-    if let Some(s) = matches.value_of(arg_name) {
-        T::from_str(s).or(Err(format!(
-            "Unable to parse argument {} with value {}",
-            arg_name, s
-        )))
-    } else {
-        Err(format!("Option {} not present", arg_name))
-    }
 }

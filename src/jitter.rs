@@ -14,7 +14,7 @@ pub fn capture_jitter(cpu: u32, program_args: &ProgramArgs) {
     info!("Affinitizing jitter sampler thread to cpu: {}", cpu);
     crate::utils::affinitize_to_cpu(cpu);
 
-    if !program_args.lapic_enabled {
+    if program_args.lapic_disabled {
         warn!("Disabling local APIC interrupts on cpu: {}. This may result in the whole machine becoming unresponsive", cpu);
         disable_lapic();
     }
@@ -23,7 +23,7 @@ pub fn capture_jitter(cpu: u32, program_args: &ProgramArgs) {
     let mut results: Vec<Jitter> = vec![Jitter { ts: 0, latency: 0 }; sample_count];
     busy_loop(program_args, &mut results);
     
-    if !program_args.lapic_enabled {
+    if program_args.lapic_disabled {
         info!("Re-enabling local APIC interrupts on cpu: {}", cpu);
         enable_lapic();
     }
