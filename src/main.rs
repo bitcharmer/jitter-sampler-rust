@@ -2,7 +2,7 @@ mod utils;
 mod jitter;
 mod influx;
 
-use std::iter::FromIterator;
+use std::{iter::FromIterator, process::exit};
 
 use env_logger::Env;
 use log::{info, error};
@@ -26,7 +26,7 @@ fn main() {
         unsafe { 
             if libc::iopl(3) != 0 {
                 error!("Error while changing privilege level of the process with iopl(). Unable to turn off LAPIC.");
-                std::process::exit(1);
+                exit(1);
             }
         }
     }
@@ -73,7 +73,10 @@ fn configure_clock(matches: &ArgMatches) -> fn() -> i64 {
             "clock_realtime" => clock_realtime,
             "clock_monotonic" => clock_monotonic,
             "rdtsc" => clock_rdtsc,
-            _ => panic!("Unrecognized clock type")
+            _ => {
+                error!("Unrecognized clock type: {}", clock_type);
+                exit(1);
+            }
         },
         None => clock_realtime
     };
